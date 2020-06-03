@@ -33,7 +33,7 @@ from enumerate_iam.utils.remove_metadata import remove_metadata
 from enumerate_iam.utils.json_utils import json_encoder
 from enumerate_iam.bruteforce_tests import BRUTEFORCE_TESTS
 
-MAX_THREADS = 25
+MAX_THREADS = 12
 CLIENT_POOL = {}
 MANAGER = Manager()
 STOP_SIGNAL = MANAGER.Value('i', 0)
@@ -80,7 +80,7 @@ def enumerate_using_bruteforce(access_key, secret_key, session_token, region, ti
 
     try:
         results = pool.map_async(check_one_permission, args_generator)
-        results.get(timeout)
+        results = results.get(timeout)
     except TimeoutError:
         logger.info('Brute-forcing permissions timed out.')
         STOP_SIGNAL.value = 1
@@ -162,6 +162,25 @@ def get_client(access_key, secret_key, session_token, service_name, region):
     return client
 
 
+import multiprocessing.pool
+import functools
+
+POOL = multiprocessing.pool.ThreadPool(processes=MAX_THREADS)
+
+def timeout(max_timeout):
+    """Timeout decorator, parameter in seconds."""
+    def timeout_decorator(item):
+        """Wrap the original function."""
+        @functools.wraps(item)
+        def func_wrapper(*args, **kwargs):
+            """Closure for function."""
+            async_result = POOL.apply_async(item, args, kwargs)
+            # raises a TimeoutError if execution exceeds max_timeout
+            return async_result.get(max_timeout)
+        return func_wrapper
+    return timeout_decorator
+
+
 def check_one_permission(arg_tuple):
     access_key, secret_key, session_token, region, stop_signal, service_name, operation_name = arg_tuple
     logger = logging.getLogger()
@@ -186,11 +205,12 @@ def check_one_permission(arg_tuple):
     if stop_signal.value == 1:
         return
     try:
-        action_response = action_function()
+        action_response = timeout(15)(action_function)()
     except (botocore.exceptions.ClientError,
             botocore.exceptions.EndpointConnectionError,
             botocore.exceptions.ConnectTimeoutError,
-            botocore.exceptions.ReadTimeoutError):
+            botocore.exceptions.ReadTimeoutError,
+            TimeoutError):
         return
     except botocore.exceptions.ParamValidationError:
         logger.error('Remove %s.%s action' % (service_name, operation_name))
